@@ -167,7 +167,9 @@ SpiDev_writebytes(SpiDevObject *self, PyObject *args)
 		return NULL;
 	len = pybuf.len;
 
+	Py_BEGIN_ALLOW_THREADS
 	status = write(self->fd, pybuf.buf, len);
+	Py_END_ALLOW_THREADS
 
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
@@ -206,8 +208,10 @@ SpiDev_readbytes(SpiDevObject *self, PyObject *args)
 	else if (len > sizeof(rxbuf))
 		len = sizeof(rxbuf);
 
+	Py_BEGIN_ALLOW_THREADS
 	memset(rxbuf, 0, sizeof rxbuf);
 	status = read(self->fd, &rxbuf[0], len);
+	Py_END_ALLOW_THREADS
 
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
@@ -276,7 +280,9 @@ SpiDev_xfer(SpiDevObject *self, PyObject *args)
 		xferptr[ii].bits_per_word = bits_per_word ? bits_per_word : self->bits_per_word;
 	}
 
+	Py_BEGIN_ALLOW_THREADS
 	status = ioctl(self->fd, SPI_IOC_MESSAGE(len), xferptr);
+	Py_END_ALLOW_THREADS
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
 		free(xferptr);
@@ -292,7 +298,9 @@ SpiDev_xfer(SpiDevObject *self, PyObject *args)
 	xfer.speed_hz = speed_hz ? speed_hz : self->max_speed_hz;
 	xfer.bits_per_word = bits_per_word ? bits_per_word : self->bits_per_word;
 
+	Py_BEGIN_ALLOW_THREADS
 	status = ioctl(self->fd, SPI_IOC_MESSAGE(1), &xfer);
+	Py_END_ALLOW_THREADS
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
 		free_tx_data(&pybuf);
@@ -357,7 +365,9 @@ SpiDev_xfer2(SpiDevObject *self, PyObject *args)
 	xfer.speed_hz = speed_hz ? speed_hz : self->max_speed_hz;
 	xfer.bits_per_word = bits_per_word ? bits_per_word : self->bits_per_word;
 
+	Py_BEGIN_ALLOW_THREADS
 	status = ioctl(self->fd, SPI_IOC_MESSAGE(1), &xfer);
+	Py_END_ALLOW_THREADS
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
 		free_tx_data(&pybuf);
