@@ -47,6 +47,60 @@ typedef struct {
 	uint32_t max_speed_hz;	/* current SPI max speed setting in Hz */
 } SpiDevObject;
 
+static char *wrmsg = "Argument must be a buffer or list of at least one, "
+				"but not more than 4096 integers";
+
+static void
+get_tx_data(PyObject *arg, Py_buffer *pybuf)
+{
+	int status;
+	pybuf->buf = NULL;
+	if (PyObject_CheckBuffer(arg)) {
+		status = PyObject_GetBuffer(arg, pybuf, PyBUF_SIMPLE);
+		if (status < 0) {
+		    PyErr_SetString(PyExc_TypeError, wrmsg);
+		    return;
+		}
+	} else if (PyList_Check(arg)) {
+		uint8_t *buf;
+		int len, ii;
+
+		len = PyList_GET_SIZE(arg);
+		if (len > SPIDEV_MAXPATH) {
+			PyErr_SetString(PyExc_OverflowError, wrmsg);
+			return;
+		}
+
+		buf = malloc(len);
+		for (ii = 0; ii < len; ii++) {
+			PyObject *val = PyList_GET_ITEM(arg, ii);
+			if (!PyInt_Check(val)) {
+				PyErr_SetString(PyExc_TypeError, wrmsg);
+				free(buf);
+			}
+			buf[ii] = (__u8)PyInt_AS_LONG(val);
+		}
+		pybuf->buf = &buf[0];
+		pybuf->len = len;
+		pybuf->itemsize = 0;
+	} else {
+		PyErr_SetString(PyExc_TypeError, wrmsg);
+	}
+}
+
+static void
+free_tx_data(Py_buffer *pybuf)
+{
+	if (!pybuf->buf)
+		return;
+
+	if (pybuf->itemsize != 0) {
+		PyBuffer_Release(pybuf);
+	} else {
+		free(pybuf->buf);
+	}
+}
+
 static PyObject *
 SpiDev_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
@@ -93,9 +147,6 @@ SpiDev_dealloc(SpiDevObject *self)
 	self->ob_type->tp_free((PyObject *)self);
 }
 
-static char *wrmsg = "Argument must be a list of at least one, "
-				"but not more than 4096 integers";
-
 PyDoc_STRVAR(SpiDev_write_doc,
 	"write([values]) -> None\n\n"
 	"Write bytes to SPI device.\n");
@@ -104,38 +155,27 @@ static PyObject *
 SpiDev_writebytes(SpiDevObject *self, PyObject *args)
 {
 	int		status;
-	uint16_t	ii, len;
-	uint8_t	buf[SPIDEV_MAXPATH];
+	int		len;
 	PyObject	*list;
+	Py_buffer  pybuf;
 
 	if (!PyArg_ParseTuple(args, "O:write", &list))
 		return NULL;
 
-	if (!PyList_Check(list)) {
-		PyErr_SetString(PyExc_TypeError, wrmsg);
+	get_tx_data(list, &pybuf);
+	if (!pybuf.buf)
 		return NULL;
-	}
+	len = pybuf.len;
 
-	if ((len = PyList_GET_SIZE(list)) > SPIDEV_MAXPATH) {
-		PyErr_SetString(PyExc_OverflowError, wrmsg);
-		return NULL;
-	}
-
-	for (ii = 0; ii < len; ii++) {
-		PyObject *val = PyList_GET_ITEM(list, ii);
-		if (!PyInt_Check(val)) {
-			PyErr_SetString(PyExc_TypeError, wrmsg);
-			return NULL;
-		}
-		buf[ii] = (__u8)PyInt_AS_LONG(val);
-	}
-
-	status = write(self->fd, &buf[0], len);
+	status = write(self->fd, pybuf.buf, len);
 
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
+		free_tx_data(&pybuf);
 		return NULL;
 	}
+
+	free_tx_data(&pybuf);
 
 	if (status != len) {
 		perror("short write");
@@ -205,6 +245,7 @@ SpiDev_xfer(SpiDevObject *self, PyObject *args)
 	uint32_t speed_hz = 0;
 	uint8_t bits_per_word = 0;
 	PyObject *list;
+	Py_buffer pybuf;
 #ifdef SPIDEV_SINGLE
 	struct spi_ioc_transfer *xferptr;
 #else
@@ -215,32 +256,18 @@ SpiDev_xfer(SpiDevObject *self, PyObject *args)
 	if (!PyArg_ParseTuple(args, "O|IHB:xfer", &list, &speed_hz, &delay_usecs, &bits_per_word))
 		return NULL;
 
-	if (!PyList_Check(list)) {
-		PyErr_SetString(PyExc_TypeError, wrmsg);
+	get_tx_data(list, &pybuf);
+	if (!pybuf.buf)
 		return NULL;
-	}
 
-	if ((len = PyList_GET_SIZE(list)) > SPIDEV_MAXPATH) {
-		PyErr_SetString(PyExc_OverflowError, wrmsg);
-		return NULL;
-	}
-
-	txbuf = malloc(sizeof(__u8) * len);
+	txbuf = pybuf.buf;
+	len = pybuf.len;
 	rxbuf = malloc(sizeof(__u8) * len);
 
 #ifdef SPIDEV_SINGLE
 	xferptr = (struct spi_ioc_transfer*) malloc(sizeof(struct spi_ioc_transfer) * len);
 
 	for (ii = 0; ii < len; ii++) {
-		PyObject *val = PyList_GET_ITEM(list, ii);
-		if (!PyInt_Check(val)) {
-			PyErr_SetString(PyExc_TypeError, wrmsg);
-			free(xferptr);
-			free(txbuf);
-			free(rxbuf);
-			return NULL;
-		}
-		txbuf[ii] = (__u8)PyInt_AS_LONG(val);
 		xferptr[ii].tx_buf = (unsigned long)&txbuf[ii];
 		xferptr[ii].rx_buf = (unsigned long)&rxbuf[ii];
 		xferptr[ii].len = 1;
@@ -253,22 +280,11 @@ SpiDev_xfer(SpiDevObject *self, PyObject *args)
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
 		free(xferptr);
-		free(txbuf);
+		free_tx_data(&pybuf);
 		free(rxbuf);
 		return NULL;
 	}
 #else
-	for (ii = 0; ii < len; ii++) {
-		PyObject *val = PyList_GET_ITEM(list, ii);
-		if (!PyInt_Check(val)) {
-			PyErr_SetString(PyExc_TypeError, wrmsg);
-			free(txbuf);
-			free(rxbuf);
-			return NULL;
-		}
-		txbuf[ii] = (__u8)PyInt_AS_LONG(val);
-	}
-
 	xfer.tx_buf = (unsigned long)txbuf;
 	xfer.rx_buf = (unsigned long)rxbuf;
 	xfer.len = len;
@@ -279,7 +295,7 @@ SpiDev_xfer(SpiDevObject *self, PyObject *args)
 	status = ioctl(self->fd, SPI_IOC_MESSAGE(1), &xfer);
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
-		free(txbuf);
+		free_tx_data(&pybuf);
 		free(rxbuf);
 		return NULL;
 	}
@@ -298,7 +314,7 @@ SpiDev_xfer(SpiDevObject *self, PyObject *args)
 	// Stop generating an extra CS except in mode CS_HOGH
 	if (self->mode & SPI_CS_HIGH) status = read(self->fd, &rxbuf[0], 0);
 
-	free(txbuf);
+	free_tx_data(&pybuf);
 	free(rxbuf);
 
 	return list;
@@ -313,43 +329,26 @@ PyDoc_STRVAR(SpiDev_xfer2_doc,
 static PyObject *
 SpiDev_xfer2(SpiDevObject *self, PyObject *args)
 {
-	static char *msg = "Argument must be a list of at least one, "
-				"but not more than 4096 integers";
 	int status;
 	uint16_t delay_usecs = 0;
 	uint32_t speed_hz = 0;
 	uint8_t bits_per_word = 0;
 	uint16_t ii, len;
 	PyObject *list;
+	Py_buffer pybuf;
 	struct spi_ioc_transfer xfer;
 	uint8_t *txbuf, *rxbuf;
 
 	if (!PyArg_ParseTuple(args, "O|IHB:xfer2", &list, &speed_hz, &delay_usecs, &bits_per_word))
 		return NULL;
 
-	if (!PyList_Check(list)) {
-		PyErr_SetString(PyExc_TypeError, wrmsg);
+	get_tx_data(list, &pybuf);
+	if (!pybuf.buf)
 		return NULL;
-	}
 
-	if ((len = PyList_GET_SIZE(list)) > SPIDEV_MAXPATH) {
-		PyErr_SetString(PyExc_OverflowError, wrmsg);
-		return NULL;
-	}
-
-	txbuf = malloc(sizeof(__u8) * len);
+	txbuf = pybuf.buf;
+	len = pybuf.len;
 	rxbuf = malloc(sizeof(__u8) * len);
-
-	for (ii = 0; ii < len; ii++) {
-		PyObject *val = PyList_GET_ITEM(list, ii);
-		if (!PyInt_Check(val)) {
-			PyErr_SetString(PyExc_TypeError, msg);
-			free(txbuf);
-			free(rxbuf);
-			return NULL;
-		}
-		txbuf[ii] = (__u8)PyInt_AS_LONG(val);
-	}
 
 	xfer.tx_buf = (unsigned long)txbuf;
 	xfer.rx_buf = (unsigned long)rxbuf;
@@ -361,7 +360,7 @@ SpiDev_xfer2(SpiDevObject *self, PyObject *args)
 	status = ioctl(self->fd, SPI_IOC_MESSAGE(1), &xfer);
 	if (status < 0) {
 		PyErr_SetFromErrno(PyExc_IOError);
-		free(txbuf);
+		free_tx_data(&pybuf);
 		free(rxbuf);
 		return NULL;
 	}
@@ -378,7 +377,7 @@ SpiDev_xfer2(SpiDevObject *self, PyObject *args)
 	// Stop generating an extra CS except in mode CS_HOGH
 	if (self->mode & SPI_CS_HIGH) status = read(self->fd, &rxbuf[0], 0);
 
-	free(txbuf);
+	free_tx_data(&pybuf);
 	free(rxbuf);
 
 	return list;
